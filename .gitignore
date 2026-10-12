@@ -1,0 +1,18 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# local env
+.env
+
+# gltest deployment artifacts - gltest creates and *clears* this directory
+# on every run, so nothing in it can be tracked
+artifacts/
+
+# gltest output
+reports/
+*.log
