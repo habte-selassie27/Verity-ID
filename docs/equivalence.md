@@ -9,6 +9,12 @@ Implementation: `contracts/verity_id.py`, `evaluate_submission` (`judge` is the
 leader function, `validator_fn` the validator) plus the module-level helpers
 `_normalize_criteria`, `_status_map`, `_equivalent` and `_classify`.
 
+The policy inputs to that block - the claim text and the checklist - are read
+from the **frozen version** recorded on the submission
+(`submission.policy_version`), not from the live policy. Leader and validator
+therefore evaluate against byte-identical rules even if the owner edited or
+retired the policy after the evidence was filed.
+
 ## 1. What does the leader produce?
 
 A normalized structured result only:
@@ -71,6 +77,25 @@ outcome; the contract never resolves it locally and never records a coin flip.
 Error messages are deterministic, enum-like and free of timestamps, urls and
 random ids (`EXTERNAL: evidence_source_rejected:<index>`), so leader and
 validator raise byte-identical errors and agree on failure too.
+
+### What "validators disagree" looks like on-chain (measured)
+
+Observed on StudioNet with a 2-vs-2 split of `pass,pass` against `pass,fail` on a
+two-required-criterion policy:
+
+| Field | Value |
+|---|---|
+| leader `execution_result` | `SUCCESS` |
+| `status_name` | `UNDETERMINED` |
+| `get_record(submission_id)` | reverts — no record |
+| `get_submission(submission_id).status` | `submitted` (retryable) |
+
+The leader executes cleanly because it only has to produce *its own* result —
+disagreement is a validator-level fact, not a leader execution failure. So
+`tx_execution_failed(receipt)` is **not** a valid check for this case: the
+receipt reports `SUCCESS` while consensus stays unresolved and no verdict is
+committed. Assert on "no record + still `submitted`" instead, which is what
+`tests/integration/test_verity_id.py` now does.
 
 ## Prompt injection stance
 
