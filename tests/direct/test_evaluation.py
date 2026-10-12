@@ -91,6 +91,7 @@ def test_multi_source_evaluation_is_verified(direct_vm, direct_deploy):
         ["registry agrees", "issuer letter agrees"],
         [],
         2,
+        ["example.edu"],
     )
     submission_id = submit(
         contract,

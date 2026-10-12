@@ -64,6 +64,7 @@ def test_owner_can_update_policy(direct_vm, direct_deploy, direct_alice):
         ["Updated criterion"],
         [],
         2,
+        ["example.edu", "letters.example.edu"],
     )
 
     policy = contract.get_policy(policy_id)
@@ -72,6 +73,8 @@ def test_owner_can_update_policy(direct_vm, direct_deploy, direct_alice):
     assert policy["criteria"] == ["Updated criterion"]
     assert policy["optional_criteria"] == []
     assert policy["min_sources"] == 2
+    assert policy["allowed_domains"] == ["example.edu", "letters.example.edu"]
+    assert policy["version"] == 2
 
 
 def test_non_owner_cannot_update_policy(direct_vm, direct_deploy, direct_alice, direct_bob):
@@ -81,7 +84,9 @@ def test_non_owner_cannot_update_policy(direct_vm, direct_deploy, direct_alice, 
 
     direct_vm.sender = direct_bob
     with direct_vm.expect_revert("EXPECTED: policy_not_owner"):
-        contract.update_policy(policy_id, "hijacked", ["issuer_registry"], ["c"], [], 1)
+        contract.update_policy(
+            policy_id, "hijacked", ["issuer_registry"], ["c"], [], 1, ["example.edu"]
+        )
 
     direct_vm.sender = direct_alice
     assert contract.get_policy(policy_id)["claim_description"] == CLAIM
@@ -110,7 +115,9 @@ def test_retire_policy_is_final(direct_vm, direct_deploy, direct_alice):
     with direct_vm.expect_revert("EXPECTED: policy_not_active"):
         contract.retire_policy(policy_id)
     with direct_vm.expect_revert("EXPECTED: policy_not_active"):
-        contract.update_policy(policy_id, "late edit", ["issuer_registry"], ["c"], [], 1)
+        contract.update_policy(
+            policy_id, "late edit", ["issuer_registry"], ["c"], [], 1, ["example.edu"]
+        )
 
 
 def test_unknown_policy_reverts(direct_vm, direct_deploy, direct_alice):
@@ -122,7 +129,9 @@ def test_unknown_policy_reverts(direct_vm, direct_deploy, direct_alice):
     with direct_vm.expect_revert("EXPECTED: policy_not_found"):
         contract.retire_policy("pol-404")
     with direct_vm.expect_revert("EXPECTED: policy_not_found"):
-        contract.update_policy("pol-404", "claim", ["issuer_registry"], ["c"], [], 1)
+        contract.update_policy(
+            "pol-404", "claim", ["issuer_registry"], ["c"], [], 1, ["example.edu"]
+        )
 
 
 def test_eight_criteria_are_accepted(direct_vm, direct_deploy, direct_alice):

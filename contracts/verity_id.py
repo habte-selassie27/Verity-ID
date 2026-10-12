@@ -5,6 +5,18 @@ A verifier publishes a CredentialPolicy. A submitter provides bounded evidence
 references. Validators fetch the evidence and judge each policy criterion, then
 the contract records `verified`, `rejected` or `inconclusive`.
 
+Frozen policy versions.
+    Every submission records the policy version in force when it was filed, and
+    evaluation reads that version's claim and checklist. update_policy publishes
+    a new version and never rewrites an old one, so a later owner edit can never
+    change the rules under which already-pending evidence is judged.
+
+Source controls.
+    Evidence must be https, with no credentials, no explicit port and a DNS
+    hostname (never an IP literal). A policy may additionally declare
+    `allowed_domains`; when non-empty, every evidence host must match one of
+    them exactly or as a subdomain.
+
 Authenticity is not truth.
     Validators only judge whether evidence SUPPORTS a claim under a policy at
     this time. They cannot prove a source document is genuine. Prefer
@@ -31,8 +43,12 @@ MAX_CRITERION_CHARS = 300
 MAX_EVIDENCE_REFS = 8
 MAX_URL_CHARS = 500
 MAX_SOURCE_CHARS = 4000
+MAX_DOMAINS = 8
+MAX_DOMAIN_CHARS = 100
 
 # ------------------------------------------------------------- vocabularies ---
+HOST_LABEL_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-"
+
 EVIDENCE_TYPES = (
     "issuer_registry",
     "certificate",
@@ -79,6 +95,11 @@ CRITERION_STATUS_KEYS = ("status", "result", "judgement", "judgment")
 def _fail(prefix: str, detail: str) -> None:
     """Deterministic error. Prefixes: EXPECTED, EXTERNAL, TRANSIENT, LLM_ERROR."""
     raise Exception(prefix + ": " + detail)
+
+
+def _policy_key(policy_id: str, version) -> str:
+    """Storage key for one immutable version of a policy's rules."""
+    return policy_id + "#" + str(int(version))
 
 
 def _clean_text(value: str, field: str, max_chars: int) -> str:
@@ -137,16 +158,95 @@ def _clean_min_sources(min_sources: int, evidence_types: list) -> int:
     return min_sources
 
 
-def _clean_url(url: str) -> str:
+def _is_plain_host(host: str) -> bool:
+    """True for a DNS hostname, false for anything that is not one.
+
+    Requires dotted labels drawn from [a-z0-9-] with no empty label and no
+    leading/trailing hyphen, and rejects IPv4 literals outright - a validator
+    must never be pointed at a raw address.
+    """
+    if "." not in host:
+        return False
+    labels = host.split(".")
+    all_numeric = True
+    for label in labels:
+        if len(label) == 0 or label.startswith("-") or label.endswith("-"):
+            return False
+        for character in label:
+            if character not in HOST_LABEL_CHARS:
+                return False
+            if character not in "0123456789":
+                all_numeric = False
+    return not all_numeric
+
+
+def _host_matches(host: str, allowed_domains: list) -> bool:
+    """An empty allowlist means 'any https host'; otherwise exact or subdomain."""
+    if len(allowed_domains) == 0:
+        return True
+    for domain in allowed_domains:
+        if host == domain or host.endswith("." + domain):
+            return True
+    return False
+
+
+def _clean_domains(allowed_domains: list) -> list:
+    """Plain lowercase registrable domains, e.g. ['registry.example.edu']."""
+    if len(allowed_domains) > MAX_DOMAINS:
+        _fail("EXPECTED", "allowed_domains_too_many")
+    cleaned = []
+    for raw_domain in allowed_domains:
+        value = str(raw_domain).strip().lower()
+        if len(value) == 0:
+            _fail("EXPECTED", "allowed_domain_empty")
+        if len(value) > MAX_DOMAIN_CHARS:
+            _fail("EXPECTED", "allowed_domain_too_long")
+        if value != "".join(value.split()):
+            _fail("EXPECTED", "allowed_domain_whitespace")
+        if not _is_plain_host(value):
+            _fail("EXPECTED", "allowed_domain_format")
+        if value in cleaned:
+            _fail("EXPECTED", "allowed_domain_duplicate")
+        cleaned.append(value)
+    return cleaned
+
+
+def _clean_url(url: str, allowed_domains: list) -> str:
+    """HTTPS only, no credentials, no port, hostname validated and allowlisted.
+
+    URL syntax alone never makes a source trustworthy: this only removes the
+    cheaply detectable traps. Whether a source is *authoritative* is the
+    policy's allowlist decision.
+    """
     text = str(url).strip()
     if len(text) == 0:
         _fail("EXPECTED", "evidence_url_empty")
     if len(text) > MAX_URL_CHARS:
         _fail("EXPECTED", "evidence_url_too_long")
-    if not (text.startswith("https://") or text.startswith("http://")):
+    if not text.startswith("https://"):
         _fail("EXPECTED", "evidence_url_scheme")
     if text != "".join(text.split()):
         _fail("EXPECTED", "evidence_url_whitespace")
+
+    rest = text[len("https://"):]
+    authority_end = len(rest)
+    for separator in ("/", "?", "#"):
+        found = rest.find(separator)
+        if found >= 0 and found < authority_end:
+            authority_end = found
+    authority = rest[:authority_end]
+    if len(authority) == 0:
+        _fail("EXPECTED", "evidence_url_host")
+    if "@" in authority:
+        _fail("EXPECTED", "evidence_url_userinfo")
+    if ":" in authority:
+        # also rules out IPv6 literals, which are never valid here
+        _fail("EXPECTED", "evidence_url_port")
+    host = authority.lower()
+    if not _is_plain_host(host):
+        _fail("EXPECTED", "evidence_url_host")
+    if not _host_matches(host, allowed_domains):
+        _fail("EXPECTED", "evidence_url_domain_not_allowed")
     return text
 
 
@@ -304,11 +404,21 @@ def _build_prompt(claim: str, criteria: list, source_text: str) -> str:
 @allow_storage
 @dataclass
 class CredentialPolicy:
+    """Mutable header. The rules themselves live in a versioned definition."""
+
     policy_id: str
     owner: Address
+    status: str
+    version: u32
+
+
+@allow_storage
+@dataclass
+class PolicyDefinition:
+    """One immutable version of a policy's claim and minimum source count."""
+
     claim_description: str
     min_sources: u32
-    status: str
 
 
 @allow_storage
@@ -330,6 +440,7 @@ class EvidenceRef:
 class EvidenceSubmission:
     submission_id: str
     policy_id: str
+    policy_version: u32
     submitter: Address
     evidence_count: u32
     status: str
@@ -348,15 +459,20 @@ class CriterionResult:
 class VerificationRecord:
     submission_id: str
     policy_id: str
+    policy_version: u32
     verdict: str
     reason_code: str
 
 
 class VerityID(gl.Contract):
-    # policies and their per-policy checklist / evidence vocabulary
+    # policies: mutable header, plus immutable per-version definitions keyed by
+    # "<policy_id>#<version>". update_policy writes a NEW key, so every version
+    # that a submission could have been filed under stays readable forever.
     policies: TreeMap[str, CredentialPolicy]
+    policy_definitions: TreeMap[str, PolicyDefinition]
     policy_criteria: TreeMap[str, TreeMap[str, Criterion]]
     policy_evidence_types: TreeMap[str, TreeMap[str, str]]
+    policy_domains: TreeMap[str, TreeMap[str, str]]
     # submissions and their per-submission evidence references
     submissions: TreeMap[str, EvidenceSubmission]
     submission_evidence: TreeMap[str, TreeMap[str, EvidenceRef]]
@@ -381,22 +497,30 @@ class VerityID(gl.Contract):
         criteria: list,
         optional_criteria: list,
         min_sources: int,
+        allowed_domains: list,
     ) -> str:
         claim = _clean_text(claim_description, "claim_description", MAX_CLAIM_CHARS)
         clean_types = _clean_evidence_types(evidence_types)
         clean_criteria = _clean_criteria(criteria, optional_criteria)
         clean_min_sources = _clean_min_sources(int(min_sources), clean_types)
+        clean_domains = _clean_domains(allowed_domains)
 
         self.policy_seq = u32(int(self.policy_seq) + 1)
         policy_id = "pol-" + str(int(self.policy_seq))
         self.policies[policy_id] = CredentialPolicy(
             policy_id=policy_id,
             owner=gl.message.sender_address,
-            claim_description=claim,
-            min_sources=u32(clean_min_sources),
             status=POLICY_ACTIVE,
+            version=u32(1),
         )
-        self._write_policy_definition(policy_id, clean_types, clean_criteria)
+        self._write_policy_definition(
+            _policy_key(policy_id, 1),
+            claim,
+            clean_min_sources,
+            clean_types,
+            clean_criteria,
+            clean_domains,
+        )
         return policy_id
 
     @gl.public.write
@@ -408,7 +532,14 @@ class VerityID(gl.Contract):
         criteria: list,
         optional_criteria: list,
         min_sources: int,
+        allowed_domains: list,
     ) -> None:
+        """Publish the next version. Older versions are never rewritten.
+
+        A submission records the version in force when it was filed and is
+        judged against that version, so an owner edit can never change the
+        rules under which already-pending evidence is assessed.
+        """
         policy = self.policies.get(policy_id)
         if policy is None:
             _fail("EXPECTED", "policy_not_found")
@@ -421,12 +552,18 @@ class VerityID(gl.Contract):
         clean_types = _clean_evidence_types(evidence_types)
         clean_criteria = _clean_criteria(criteria, optional_criteria)
         clean_min_sources = _clean_min_sources(int(min_sources), clean_types)
+        clean_domains = _clean_domains(allowed_domains)
 
-        policy.claim_description = claim
-        policy.min_sources = u32(clean_min_sources)
-        self.policy_evidence_types.get_or_insert_default(policy_id).clear()
-        self.policy_criteria.get_or_insert_default(policy_id).clear()
-        self._write_policy_definition(policy_id, clean_types, clean_criteria)
+        next_version = int(policy.version) + 1
+        self._write_policy_definition(
+            _policy_key(policy_id, next_version),
+            claim,
+            clean_min_sources,
+            clean_types,
+            clean_criteria,
+            clean_domains,
+        )
+        policy.version = u32(next_version)
 
     @gl.public.write
     def retire_policy(self, policy_id: str) -> None:
@@ -439,16 +576,32 @@ class VerityID(gl.Contract):
             _fail("EXPECTED", "policy_not_active")
         policy.status = POLICY_RETIRED
 
-    def _write_policy_definition(self, policy_id: str, clean_types: list, clean_criteria: list) -> None:
-        type_slots = self.policy_evidence_types.get_or_insert_default(policy_id)
+    def _write_policy_definition(
+        self,
+        key: str,
+        claim: str,
+        min_sources: int,
+        clean_types: list,
+        clean_criteria: list,
+        clean_domains: list,
+    ) -> None:
+        """Store one immutable version of a policy's rules under `key`."""
+        self.policy_definitions[key] = PolicyDefinition(
+            claim_description=claim,
+            min_sources=u32(min_sources),
+        )
+        type_slots = self.policy_evidence_types.get_or_insert_default(key)
         for position in range(0, len(clean_types)):
             type_slots[str(position)] = clean_types[position]
-        criterion_slots = self.policy_criteria.get_or_insert_default(policy_id)
+        criterion_slots = self.policy_criteria.get_or_insert_default(key)
         for position in range(0, len(clean_criteria)):
             criterion_slots[str(position)] = Criterion(
                 text=clean_criteria[position]["text"],
                 required=clean_criteria[position]["required"],
             )
+        domain_slots = self.policy_domains.get_or_insert_default(key)
+        for position in range(0, len(clean_domains)):
+            domain_slots[str(position)] = clean_domains[position]
 
     # --------------------------------------------------------- submission ----
     @gl.public.write
@@ -467,17 +620,25 @@ class VerityID(gl.Contract):
             _fail("EXPECTED", "evidence_length_mismatch")
         if len(evidence_urls) == 0 or len(evidence_urls) > MAX_EVIDENCE_REFS:
             _fail("EXPECTED", "evidence_count_out_of_range")
-        if len(evidence_urls) < int(policy.min_sources):
+
+        # Evidence is validated against the version in force right now, and that
+        # version number travels with the submission.
+        key = _policy_key(policy_id, policy.version)
+        definition = self.policy_definitions.get(key)
+        if definition is None:
+            _fail("EXPECTED", "policy_not_found")
+        if len(evidence_urls) < int(definition.min_sources):
             _fail("EXPECTED", "evidence_below_min_sources")
 
-        allowed_types = self._policy_evidence_type_list(policy_id)
+        allowed_types = self._policy_evidence_type_list(key)
+        allowed_domains = self._policy_domains_list(key)
         refs = []
         seen_urls = []
         for position in range(0, len(evidence_urls)):
             ref_type = str(evidence_types[position]).strip().lower()
             if ref_type not in allowed_types:
                 _fail("EXPECTED", "evidence_type_not_in_policy")
-            url = _clean_url(evidence_urls[position])
+            url = _clean_url(evidence_urls[position], allowed_domains)
             if url in seen_urls:
                 _fail("EXPECTED", "evidence_url_duplicate")
             seen_urls.append(url)
@@ -496,6 +657,7 @@ class VerityID(gl.Contract):
         self.submissions[submission_id] = EvidenceSubmission(
             submission_id=submission_id,
             policy_id=policy_id,
+            policy_version=policy.version,
             submitter=gl.message.sender_address,
             evidence_count=u32(len(refs)),
             status=SUBMISSION_OPEN,
@@ -521,10 +683,17 @@ class VerityID(gl.Contract):
         if policy is None:
             _fail("EXPECTED", "policy_not_found")
 
+        # Judge against the version frozen when the evidence was filed. A later
+        # owner edit, or a retirement, can never change these rules.
+        key = _policy_key(submission.policy_id, submission.policy_version)
+        definition = self.policy_definitions.get(key)
+        if definition is None:
+            _fail("EXPECTED", "policy_version_not_found")
+
         # Plain-data snapshot: only these values enter the non-deterministic
         # block, so the leader/validator closures stay serializable.
-        claim = policy.claim_description
-        criteria = self._policy_criteria_list(submission.policy_id)
+        claim = definition.claim_description
+        criteria = self._policy_criteria_list(key)
         evidence = self._submission_evidence_list(submission_id)
 
         def judge() -> dict:
@@ -588,6 +757,7 @@ class VerityID(gl.Contract):
         self.records[submission_id] = VerificationRecord(
             submission_id=submission_id,
             policy_id=submission.policy_id,
+            policy_version=submission.policy_version,
             verdict=verdict["verdict"],
             reason_code=verdict["reason_code"],
         )
@@ -601,18 +771,27 @@ class VerityID(gl.Contract):
         submission.status = SUBMISSION_EVALUATED
 
     # -------------------------------------------------------------- views ----
-    def _policy_evidence_type_list(self, policy_id: str) -> list:
+    def _policy_evidence_type_list(self, key: str) -> list:
         values = []
-        slots = self.policy_evidence_types.get(policy_id)
+        slots = self.policy_evidence_types.get(key)
         if slots is None:
             return values
         for position in range(0, len(slots)):
             values.append(slots[str(position)])
         return values
 
-    def _policy_criteria_list(self, policy_id: str) -> list:
+    def _policy_domains_list(self, key: str) -> list:
+        values = []
+        slots = self.policy_domains.get(key)
+        if slots is None:
+            return values
+        for position in range(0, len(slots)):
+            values.append(slots[str(position)])
+        return values
+
+    def _policy_criteria_list(self, key: str) -> list:
         entries = []
-        slots = self.policy_criteria.get(policy_id)
+        slots = self.policy_criteria.get(key)
         if slots is None:
             return entries
         for position in range(0, len(slots)):
@@ -625,6 +804,28 @@ class VerityID(gl.Contract):
                 }
             )
         return entries
+
+    def _definition_view(self, policy: CredentialPolicy, version: int) -> dict:
+        """Render one stored version of a policy's rules."""
+        key = _policy_key(policy.policy_id, version)
+        definition = self.policy_definitions.get(key)
+        if definition is None:
+            _fail("EXPECTED", "policy_version_out_of_range")
+        criteria = self._policy_criteria_list(key)
+        return {
+            "policy_id": policy.policy_id,
+            "version": int(version),
+            "owner": policy.owner.as_hex,
+            "claim_description": definition.claim_description,
+            "evidence_types": self._policy_evidence_type_list(key),
+            "allowed_domains": self._policy_domains_list(key),
+            "criteria": [entry["text"] for entry in criteria if entry["required"]],
+            "optional_criteria": [
+                entry["text"] for entry in criteria if not entry["required"]
+            ],
+            "min_sources": int(definition.min_sources),
+            "status": policy.status,
+        }
 
     def _submission_evidence_list(self, submission_id: str) -> list:
         refs = []
@@ -641,21 +842,20 @@ class VerityID(gl.Contract):
         policy = self.policies.get(policy_id)
         if policy is None:
             _fail("EXPECTED", "policy_not_found")
-        criteria = self._policy_criteria_list(policy_id)
         submission_slots = self.policy_submissions.get(policy_id)
-        return {
-            "policy_id": policy.policy_id,
-            "owner": policy.owner.as_hex,
-            "claim_description": policy.claim_description,
-            "evidence_types": self._policy_evidence_type_list(policy_id),
-            "criteria": [entry["text"] for entry in criteria if entry["required"]],
-            "optional_criteria": [
-                entry["text"] for entry in criteria if not entry["required"]
-            ],
-            "min_sources": int(policy.min_sources),
-            "status": policy.status,
-            "submission_count": 0 if submission_slots is None else len(submission_slots),
-        }
+        view = self._definition_view(policy, policy.version)
+        view["submission_count"] = 0 if submission_slots is None else len(submission_slots)
+        return view
+
+    @gl.public.view
+    def get_policy_version(self, policy_id: str, version: int) -> dict:
+        """Read any stored version - this is what a pending submission is judged by."""
+        policy = self.policies.get(policy_id)
+        if policy is None:
+            _fail("EXPECTED", "policy_not_found")
+        if version < 1 or version > int(policy.version):
+            _fail("EXPECTED", "policy_version_out_of_range")
+        return self._definition_view(policy, version)
 
     @gl.public.view
     def get_submission(self, submission_id: str) -> dict:
@@ -665,6 +865,7 @@ class VerityID(gl.Contract):
         return {
             "submission_id": submission.submission_id,
             "policy_id": submission.policy_id,
+            "policy_version": int(submission.policy_version),
             "submitter": submission.submitter.as_hex,
             "evidence": self._submission_evidence_list(submission_id),
             "status": submission.status,
@@ -691,6 +892,7 @@ class VerityID(gl.Contract):
         return {
             "submission_id": record.submission_id,
             "policy_id": record.policy_id,
+            "policy_version": int(record.policy_version),
             "verdict": record.verdict,
             "reason_code": record.reason_code,
             "criteria_results": criteria_results,

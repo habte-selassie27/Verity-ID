@@ -78,6 +78,7 @@ def test_failure_index_identifies_the_source(direct_vm, direct_deploy):
         ["criterion"],
         [],
         2,
+        ["example.edu"],
     )
     submission_id = submit(
         contract,

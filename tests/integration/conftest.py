@@ -86,14 +86,24 @@ def mock_validators(llm_payloads, web=None):
     return {"validators": validators, "genvm_datetime": GENVM_DATETIME}
 
 
-def create_policy(contract, criteria=None, optional=None, types=None, min_sources=None):
+def create_policy(
+    contract, criteria=None, optional=None, types=None, min_sources=None, domains=None
+):
     """Create the standard single-source degree policy."""
     resolved_types = ["issuer_registry"] if types is None else types
     resolved_criteria = [REQUIRED_CRITERION] if criteria is None else criteria
     resolved_optional = [OPTIONAL_CRITERION] if optional is None else optional
     resolved_min = len(resolved_types) if min_sources is None else min_sources
+    resolved_domains = ["example.edu"] if domains is None else domains
     return contract.create_policy(
-        args=[CLAIM, resolved_types, resolved_criteria, resolved_optional, resolved_min]
+        args=[
+            CLAIM,
+            resolved_types,
+            resolved_criteria,
+            resolved_optional,
+            resolved_min,
+            resolved_domains,
+        ]
     ).transact()
 
 

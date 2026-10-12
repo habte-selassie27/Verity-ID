@@ -146,6 +146,58 @@ def test_validator_rejects_required_status_flip_even_when_verdict_matches(
     assert direct_vm.run_validator(leader_result=leader_mirrored) is False
 
 
+def test_validator_detects_evidence_that_changed_between_fetches(
+    direct_vm, direct_deploy
+):
+    """Leader judged the page as it was; the validator re-fetches a changed page.
+
+    This is the web analogue of a leader/validator disagreement: same policy,
+    same URL, different content. The rule must report not-equivalent rather than
+    average the two answers.
+    """
+    contract, _ = _evaluate_and_get_validator(direct_vm, direct_deploy)
+
+    # the validator's fresh fetch now contradicts what the leader recorded
+    direct_vm.clear_mocks()
+    mock_registry(direct_vm)
+    mock_judgement(direct_vm, "fail")
+
+    leader_saw_support = {"criteria": [{"id": "0", "status": "pass"}]}
+    assert direct_vm.run_validator(leader_result=leader_saw_support) is False
+
+    # ...and the reverse direction is equally a disagreement
+    direct_vm.clear_mocks()
+    mock_registry(direct_vm)
+    mock_judgement(direct_vm, "pass")
+
+    leader_saw_contradiction = {"criteria": [{"id": "0", "status": "fail"}]}
+    assert direct_vm.run_validator(leader_result=leader_saw_contradiction) is False
+
+
+def test_validator_agrees_when_the_page_is_unchanged(
+    direct_vm, direct_deploy
+):
+    """Control for the test above: identical re-fetch stays equivalent."""
+    contract, _ = _evaluate_and_get_validator(direct_vm, direct_deploy)
+
+    direct_vm.clear_mocks()
+    mock_registry(direct_vm)
+    mock_judgement(direct_vm, "pass")
+
+    assert direct_vm.run_validator() is True
+
+
+def test_validator_rejects_leader_that_omits_the_whole_checklist(
+    direct_vm, direct_deploy
+):
+    contract, _ = _evaluate_and_get_validator(
+        direct_vm, direct_deploy, criteria=["criterion one", "criterion two"]
+    )
+
+    assert direct_vm.run_validator(leader_result={"criteria": []}) is False
+    assert direct_vm.run_validator(leader_result={}) is False
+
+
 def test_nondet_closures_are_cloudpickle_serializable(direct_vm, direct_deploy):
     """Production ships the leader/validator through cloudpickle.
 
