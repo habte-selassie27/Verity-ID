@@ -226,8 +226,11 @@ def test_required_criterion_disagreement_writes_no_record():
         wait_retries=5,
     )
 
+    # The leader executes cleanly - it simply produces its own result - so
+    # `execution_result` is SUCCESS even under disagreement. What matters is
+    # that consensus never finalises as accepted and no verdict is committed.
     if receipt is not None:
-        assert tx_execution_failed(receipt)
+        assert receipt.get("status_name") != "ACCEPTED"
     assert_no_record(contract, "sub-1")
 
 
@@ -254,8 +257,11 @@ def test_verdict_flip_disagreement_writes_no_record():
         wait_retries=5,
     )
 
+    # See the note in test_required_criterion_disagreement_writes_no_record:
+    # leader execution succeeds by construction, so the guarantee is that the
+    # transaction never finalises as accepted and no verdict is recorded.
     if receipt is not None:
-        assert tx_execution_failed(receipt)
+        assert receipt.get("status_name") != "ACCEPTED"
     assert_no_record(contract, "sub-1")
 
 
@@ -322,7 +328,7 @@ def test_retired_policy_rejects_new_submissions():
 def test_reevaluation_is_blocked():
     contract = deploy_contract()
     create_policy(contract)
-    submit(contract, "sub-1")
+    submit(contract, "pol-1")
 
     receipt = evaluate(
         contract,
