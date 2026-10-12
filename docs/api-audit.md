@@ -114,7 +114,7 @@ variant and exercising it. That needs a node round-trip per change.
 
 - SDK reference: <https://sdk.genlayer.com/main/_static/ai/api.txt> (rc9 docs)
 - rc7 ground truth: extracted `py-lib-genlayer-std` from the direct-mode cache
-- Empirical: 153 direct tests, 16 integration tests, 3 StudioNet deployments
+- Empirical: 153 direct tests, 15 integration tests, 3 StudioNet deployments
   (the current one, `0xD554c7…BB57`, was `diff`-verified byte-identical to
   `contracts/verity_id.py` with all 10 methods in its schema)
 

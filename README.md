@@ -245,6 +245,16 @@ and `transaction_context` is an argument to `.transact()`, not to the method.
 Each test deploys its own contract instance, so a full run leaves a handful of
 VerityID contracts on the selected network.
 
+**Expect occasional infrastructure failures, not test failures.** StudioNet
+intermittently answers back-to-back deploys with `502: Bad Gateway`, which gltest
+surfaces as `DeploymentError: Failed to deploy contract … eth_estimateGas
+returned invalid JSON` or `ValueError: Failed to get schema from all clients`.
+The tell is that the *set* of failing tests moves between runs and the same tests
+pass in isolation. Re-run the specific tests; do not weaken assertions to work
+around it. To confirm a suspected regression, check out the last known-good
+commit into a separate `git worktree` and run the same tests there — a baseline
+is the only way to tell flakiness from a real regression.
+
 ### 4. Deploy
 
 ```shell
